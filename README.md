@@ -7,7 +7,7 @@ XDPoS relies on a system of 5000 Masternodes and 21 Validator node with Proof of
 
 XDPoS Supports all EVM-compatible smart-contracts and Protocol function but optimize GAS to reduce transaction fees near to zero to the user to make network more use-case friendly. 
 
-XDPoS support Inbuild KYC/AML Feature to create as true Public trust network.
+XDPoS support Inbuild KYC/AML Feature to create Public trust network.
 
 Our website : Https://XinFin.org
 
