@@ -20,6 +20,7 @@ DPoS:
 Here is the scope for the XinFin Blockchain DPoS (Delegated Proof-of-Stake) Consensus Network Scope.
 1. Staking
 First a user will send his coins to the contract, that will register what the user staked. The user will have to wait for 2 epochs (epoch N+2N+2) before being able to vote for a delegate.
+
 2. Voting
 After 2 epochs, a user can vote for a delegate with the coins he staked. His vote will be effective in the epoch N+2N+2, NN being the current epoch.
 A new vote can be casted every 2 epochs.
@@ -29,8 +30,9 @@ We like to  choose LL validators for a certain epoch NN
 Propose Masternode-holder need to upload 3 Third party certification for KYC and AML : The one who wants to become a masternode needs to complete the KYC Process. This document will be open to public.
 
 4. Validator Node- Delegate Selection
-One who become the part of the masternode network need to stake XDC and the XDC will be locked. No one can be the part of the network node without staking XDC. Minimum 1000000 XDC (After 1 Year stake criteria should be reduce by 20% and lowest can go upto 10000 XDC not below 10000 XDC )
+One who become the part of the masternode network need to stake XDC and the XDC will be locked. No one can be the part of the network node without staking XDC. Minimum 1000000 XDC 
 Highest 21 XDC stake based node will be act as Validator node. Rest node will be act as backup node or/and act as private node to host internal use case application and they can able to connect public node using parity bridge. Total masternode should be cap to 5000
+
 5. Backup/Private Nodes
 Incase, if one of the delegate is down out of 21 node, then the 1st waiting delegate node (22nd node) according to the stake will join the network and the node which was down will be removed from the network for 5 days.
 Once the down node is ready to function, it will send a message into the network about its availability and it will again enter the network by replacing the node which replaced it provided it holds higher stake.
@@ -46,9 +48,12 @@ Delegates being offline for more than 24 hours
 If the network finds this behavior. Stake should be reduce from 4% to 100% depends on task execute by the node.
 Wrong KYC /AMA certificate lead to 100% stake reduction. Such masternode will be out of the network.
 Suppose if a node is misbehaving and we are removing it ,so will the node be present in the validators list or the node is no more part of the network.
+
 DPoS References Github Repo:
 Existing DPOS projects for Ethereum Virtual Machine:
 TomoChain: https://github.com/tomochain
 https://github.com/tomochain/tomochain/tree/master/consensus/posv
+
 Tron: https://github.com/tronprotocol/java-tron
+
 EOS : https://github.com/EOSIO
