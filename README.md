@@ -1,5 +1,6 @@
 # XDPOS
 About the XDPoS
+
 XinFin’s token XDC supplants proof-of-work consensus algorithm (popularly linked with mining and High Power Consumption) with proof-of-stake consensus algorithm, fundamentally using the concept of “validators” to Optimise Speed of the transaction, efficiency, reduce the cost of the infrastructure. This 
 Validators are special nodes used in the DPoS consensus algorithm which validate each transaction occurring on the blockchain network. The result of this validation is to finally append the transaction on the blockchain. A transaction may be accepted by the validator or rejected. 
 
@@ -16,8 +17,9 @@ Github : https://github.com/XinFinorg
 Developer Resource Document and API : http://docs.xinfin.org/ 
 
 More detail About XDPoS:
-DPoS:
+
 Here is the scope for the XinFin Blockchain DPoS (Delegated Proof-of-Stake) Consensus Network Scope.
+
 1. Staking
 First a user will send his coins to the contract, that will register what the user staked. The user will have to wait for 2 epochs (epoch N+2N+2) before being able to vote for a delegate.
 
@@ -39,7 +41,6 @@ Once the down node is ready to function, it will send a message into the network
 
 6. Reward to MasterNode
 The delegates which are consistently propagating blocks will be rewarded only. Also it depends on how much time the delegate was available for block validation. Reward will be given on monthly basis from new Block generated in Network.
-
 Daily Reward Calculation: 1 coin after creating 1000 blocks reward will be calculated based on stake and on daily basis but credit to wallet on monthly basis.
 
 7.Biased Node / Prejudiced behavior
@@ -50,6 +51,7 @@ Wrong KYC /AMA certificate lead to 100% stake reduction. Such masternode will be
 Suppose if a node is misbehaving and we are removing it ,so will the node be present in the validators list or the node is no more part of the network.
 
 DPoS References Github Repo:
+
 Existing DPOS projects for Ethereum Virtual Machine:
 TomoChain: https://github.com/tomochain
 https://github.com/tomochain/tomochain/tree/master/consensus/posv
