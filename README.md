@@ -52,7 +52,6 @@ Wrong KYC /AMA certificate lead to 100% stake reduction. Such masternode will be
 Suppose if a node is misbehaving and we are removing it ,so will the node be present in the validators list or the node is no more part of the network.
 
 DPoS References Github Repo:
-
 Existing DPOS projects for Ethereum Virtual Machine:
 
 TomoChain: https://github.com/tomochain
