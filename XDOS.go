@@ -715,4 +715,4 @@ func (c *Clique) APIs(chain consensus.ChainReader) []rpc.API \{\par
 \}\par
 \par
 }
- 
+�
