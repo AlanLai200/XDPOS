@@ -1,0 +1,718 @@
+{\rtf1\ansi\deff0\nouicompat{\fonttbl{\f0\fnil\fcharset0 Courier New;}}
+{\*\generator Riched20 10.0.17134}\viewkind4\uc1 
+\pard\f0\fs22\lang16393 // Copyright 2017 The go-ethereum Authors\par
+// This file is part of the go-ethereum library.\par
+//\par
+// The go-ethereum library is free software: you can redistribute it and/or modify\par
+// it under the terms of the GNU Lesser General Public License as published by\par
+// the Free Software Foundation, either version 3 of the License, or\par
+// (at your option) any later version.\par
+//\par
+// The go-ethereum library is distributed in the hope that it will be useful,\par
+// but WITHOUT ANY WARRANTY; without even the implied warranty of\par
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the\par
+// GNU Lesser General Public License for more details.\par
+//\par
+// You should have received a copy of the GNU Lesser General Public License\par
+// along with the go-ethereum library. If not, see <http://www.gnu.org/licenses/>.\par
+\par
+// Package clique implements the proof-of-authority consensus engine.\par
+package clique\par
+\par
+import (\par
+\tab "bytes"\par
+\tab "errors"\par
+\tab "math/big"\par
+\tab "math/rand"\par
+\tab "sync"\par
+\tab "time"\par
+\par
+\tab "github.com/ethereum/go-ethereum/accounts"\par
+\tab "github.com/ethereum/go-ethereum/common"\par
+\tab "github.com/ethereum/go-ethereum/common/hexutil"\par
+\tab "github.com/ethereum/go-ethereum/consensus"\par
+\tab "github.com/ethereum/go-ethereum/consensus/misc"\par
+\tab "github.com/ethereum/go-ethereum/core/state"\par
+\tab "github.com/ethereum/go-ethereum/core/types"\par
+\tab "github.com/ethereum/go-ethereum/crypto"\par
+\tab "github.com/ethereum/go-ethereum/crypto/sha3"\par
+\tab "github.com/ethereum/go-ethereum/ethdb"\par
+\tab "github.com/ethereum/go-ethereum/log"\par
+\tab "github.com/ethereum/go-ethereum/params"\par
+\tab "github.com/ethereum/go-ethereum/rlp"\par
+\tab "github.com/ethereum/go-ethereum/rpc"\par
+\tab lru "github.com/hashicorp/golang-lru"\par
+)\par
+\par
+const (\par
+\tab checkpointInterval = 1024 // Number of blocks after which to save the vote snapshot to the database\par
+\tab inmemorySnapshots  = 128  // Number of recent vote snapshots to keep in memory\par
+\tab inmemorySignatures = 4096 // Number of recent block signatures to keep in memory\par
+\par
+\tab wiggleTime = 500 * time.Millisecond // Random delay (per signer) to allow concurrent signers\par
+)\par
+\par
+// Clique proof-of-authority protocol constants.\par
+var (\par
+\tab epochLength = uint64(30000) // Default number of blocks after which to checkpoint and reset the pending votes\par
+\par
+\tab extraVanity = 32 // Fixed number of extra-data prefix bytes reserved for signer vanity\par
+\tab extraSeal   = 65 // Fixed number of extra-data suffix bytes reserved for signer seal\par
+\par
+\tab nonceAuthVote = hexutil.MustDecode("0xffffffffffffffff") // Magic nonce number to vote on adding a new signer\par
+\tab nonceDropVote = hexutil.MustDecode("0x0000000000000000") // Magic nonce number to vote on removing a signer.\par
+\par
+\tab uncleHash = types.CalcUncleHash(nil) // Always Keccak256(RLP([])) as uncles are meaningless outside of PoW.\par
+\par
+\tab diffInTurn = big.NewInt(2) // Block difficulty for in-turn signatures\par
+\tab diffNoTurn = big.NewInt(1) // Block difficulty for out-of-turn signatures\par
+)\par
+\par
+// Various error messages to mark blocks invalid. These should be private to\par
+// prevent engine specific errors from being referenced in the remainder of the\par
+// codebase, inherently breaking if the engine is swapped out. Please put common\par
+// error types into the consensus package.\par
+var (\par
+\tab // errUnknownBlock is returned when the list of signers is requested for a block\par
+\tab // that is not part of the local blockchain.\par
+\tab errUnknownBlock = errors.New("unknown block")\par
+\par
+\tab // errInvalidCheckpointBeneficiary is returned if a checkpoint/epoch transition\par
+\tab // block has a beneficiary set to non-zeroes.\par
+\tab errInvalidCheckpointBeneficiary = errors.New("beneficiary in checkpoint block non-zero")\par
+\par
+\tab // errInvalidVote is returned if a nonce value is something else that the two\par
+\tab // allowed constants of 0x00..0 or 0xff..f.\par
+\tab errInvalidVote = errors.New("vote nonce not 0x00..0 or 0xff..f")\par
+\par
+\tab // errInvalidCheckpointVote is returned if a checkpoint/epoch transition block\par
+\tab // has a vote nonce set to non-zeroes.\par
+\tab errInvalidCheckpointVote = errors.New("vote nonce in checkpoint block non-zero")\par
+\par
+\tab // errMissingVanity is returned if a block's extra-data section is shorter than\par
+\tab // 32 bytes, which is required to store the signer vanity.\par
+\tab errMissingVanity = errors.New("extra-data 32 byte vanity prefix missing")\par
+\par
+\tab // errMissingSignature is returned if a block's extra-data section doesn't seem\par
+\tab // to contain a 65 byte secp256k1 signature.\par
+\tab errMissingSignature = errors.New("extra-data 65 byte signature suffix missing")\par
+\par
+\tab // errExtraSigners is returned if non-checkpoint block contain signer data in\par
+\tab // their extra-data fields.\par
+\tab errExtraSigners = errors.New("non-checkpoint block contains extra signer list")\par
+\par
+\tab // errInvalidCheckpointSigners is returned if a checkpoint block contains an\par
+\tab // invalid list of signers (i.e. non divisible by 20 bytes).\par
+\tab errInvalidCheckpointSigners = errors.New("invalid signer list on checkpoint block")\par
+\par
+\tab // errMismatchingCheckpointSigners is returned if a checkpoint block contains a\par
+\tab // list of signers different than the one the local node calculated.\par
+\tab errMismatchingCheckpointSigners = errors.New("mismatching signer list on checkpoint block")\par
+\par
+\tab // errInvalidMixDigest is returned if a block's mix digest is non-zero.\par
+\tab errInvalidMixDigest = errors.New("non-zero mix digest")\par
+\par
+\tab // errInvalidUncleHash is returned if a block contains an non-empty uncle list.\par
+\tab errInvalidUncleHash = errors.New("non empty uncle hash")\par
+\par
+\tab // errInvalidDifficulty is returned if the difficulty of a block neither 1 or 2.\par
+\tab errInvalidDifficulty = errors.New("invalid difficulty")\par
+\par
+\tab // errWrongDifficulty is returned if the difficulty of a block doesn't match the\par
+\tab // turn of the signer.\par
+\tab errWrongDifficulty = errors.New("wrong difficulty")\par
+\par
+\tab // ErrInvalidTimestamp is returned if the timestamp of a block is lower than\par
+\tab // the previous block's timestamp + the minimum block period.\par
+\tab ErrInvalidTimestamp = errors.New("invalid timestamp")\par
+\par
+\tab // errInvalidVotingChain is returned if an authorization list is attempted to\par
+\tab // be modified via out-of-range or non-contiguous headers.\par
+\tab errInvalidVotingChain = errors.New("invalid voting chain")\par
+\par
+\tab // errUnauthorizedSigner is returned if a header is signed by a non-authorized entity.\par
+\tab errUnauthorizedSigner = errors.New("unauthorized signer")\par
+\par
+\tab // errRecentlySigned is returned if a header is signed by an authorized entity\par
+\tab // that already signed a header recently, thus is temporarily not allowed to.\par
+\tab errRecentlySigned = errors.New("recently signed")\par
+)\par
+\par
+// SignerFn is a signer callback function to request a hash to be signed by a\par
+// backing account.\par
+type SignerFn func(accounts.Account, []byte) ([]byte, error)\par
+\par
+// sigHash returns the hash which is used as input for the proof-of-authority\par
+// signing. It is the hash of the entire header apart from the 65 byte signature\par
+// contained at the end of the extra data.\par
+//\par
+// Note, the method requires the extra data to be at least 65 bytes, otherwise it\par
+// panics. This is done to avoid accidentally using both forms (signature present\par
+// or not), which could be abused to produce different hashes for the same header.\par
+func sigHash(header *types.Header) (hash common.Hash) \{\par
+\tab hasher := sha3.NewKeccak256()\par
+\par
+\tab rlp.Encode(hasher, []interface\{\}\{\par
+\tab\tab header.ParentHash,\par
+\tab\tab header.UncleHash,\par
+\tab\tab header.Coinbase,\par
+\tab\tab header.Root,\par
+\tab\tab header.TxHash,\par
+\tab\tab header.ReceiptHash,\par
+\tab\tab header.Bloom,\par
+\tab\tab header.Difficulty,\par
+\tab\tab header.Number,\par
+\tab\tab header.GasLimit,\par
+\tab\tab header.GasUsed,\par
+\tab\tab header.Time,\par
+\tab\tab header.Extra[:len(header.Extra)-65], // Yes, this will panic if extra is too short\par
+\tab\tab header.MixDigest,\par
+\tab\tab header.Nonce,\par
+\tab\})\par
+\tab hasher.Sum(hash[:0])\par
+\tab return hash\par
+\}\par
+\par
+// ecrecover extracts the Ethereum account address from a signed header.\par
+func ecrecover(header *types.Header, sigcache *lru.ARCCache) (common.Address, error) \{\par
+\tab // If the signature's already cached, return that\par
+\tab hash := header.Hash()\par
+\tab if address, known := sigcache.Get(hash); known \{\par
+\tab\tab return address.(common.Address), nil\par
+\tab\}\par
+\tab // Retrieve the signature from the header extra-data\par
+\tab if len(header.Extra) < extraSeal \{\par
+\tab\tab return common.Address\{\}, errMissingSignature\par
+\tab\}\par
+\tab signature := header.Extra[len(header.Extra)-extraSeal:]\par
+\par
+\tab // Recover the public key and the Ethereum address\par
+\tab pubkey, err := crypto.Ecrecover(sigHash(header).Bytes(), signature)\par
+\tab if err != nil \{\par
+\tab\tab return common.Address\{\}, err\par
+\tab\}\par
+\tab var signer common.Address\par
+\tab copy(signer[:], crypto.Keccak256(pubkey[1:])[12:])\par
+\par
+\tab sigcache.Add(hash, signer)\par
+\tab return signer, nil\par
+\}\par
+\par
+// Clique is the proof-of-authority consensus engine proposed to support the\par
+// Ethereum testnet following the Ropsten attacks.\par
+type Clique struct \{\par
+\tab config *params.CliqueConfig // Consensus engine configuration parameters\par
+\tab db     ethdb.Database       // Database to store and retrieve snapshot checkpoints\par
+\par
+\tab recents    *lru.ARCCache // Snapshots for recent block to speed up reorgs\par
+\tab signatures *lru.ARCCache // Signatures of recent blocks to speed up mining\par
+\par
+\tab proposals map[common.Address]bool // Current list of proposals we are pushing\par
+\par
+\tab signer common.Address // Ethereum address of the signing key\par
+\tab signFn SignerFn       // Signer function to authorize hashes with\par
+\tab lock   sync.RWMutex   // Protects the signer fields\par
+\par
+\tab // The fields below are for testing only\par
+\tab fakeDiff bool // Skip difficulty verifications\par
+\}\par
+\par
+// New creates a Clique proof-of-authority consensus engine with the initial\par
+// signers set to the ones provided by the user.\par
+func New(config *params.CliqueConfig, db ethdb.Database) *Clique \{\par
+\tab // Set any missing consensus parameters to their defaults\par
+\tab conf := *config\par
+\tab if conf.Epoch == 0 \{\par
+\tab\tab conf.Epoch = epochLength\par
+\tab\}\par
+\tab // Allocate the snapshot caches and create the engine\par
+\tab recents, _ := lru.NewARC(inmemorySnapshots)\par
+\tab signatures, _ := lru.NewARC(inmemorySignatures)\par
+\par
+\tab return &Clique\{\par
+\tab\tab config:     &conf,\par
+\tab\tab db:         db,\par
+\tab\tab recents:    recents,\par
+\tab\tab signatures: signatures,\par
+\tab\tab proposals:  make(map[common.Address]bool),\par
+\tab\}\par
+\}\par
+\par
+// Author implements consensus.Engine, returning the Ethereum address recovered\par
+// from the signature in the header's extra-data section.\par
+func (c *Clique) Author(header *types.Header) (common.Address, error) \{\par
+\tab return ecrecover(header, c.signatures)\par
+\}\par
+\par
+// VerifyHeader checks whether a header conforms to the consensus rules.\par
+func (c *Clique) VerifyHeader(chain consensus.ChainReader, header *types.Header, seal bool) error \{\par
+\tab return c.verifyHeader(chain, header, nil)\par
+\}\par
+\par
+// VerifyHeaders is similar to VerifyHeader, but verifies a batch of headers. The\par
+// method returns a quit channel to abort the operations and a results channel to\par
+// retrieve the async verifications (the order is that of the input slice).\par
+func (c *Clique) VerifyHeaders(chain consensus.ChainReader, headers []*types.Header, seals []bool) (chan<- struct\{\}, <-chan error) \{\par
+\tab abort := make(chan struct\{\})\par
+\tab results := make(chan error, len(headers))\par
+\par
+\tab go func() \{\par
+\tab\tab for i, header := range headers \{\par
+\tab\tab\tab err := c.verifyHeader(chain, header, headers[:i])\par
+\par
+\tab\tab\tab select \{\par
+\tab\tab\tab case <-abort:\par
+\tab\tab\tab\tab return\par
+\tab\tab\tab case results <- err:\par
+\tab\tab\tab\}\par
+\tab\tab\}\par
+\tab\}()\par
+\tab return abort, results\par
+\}\par
+\par
+// verifyHeader checks whether a header conforms to the consensus rules.The\par
+// caller may optionally pass in a batch of parents (ascending order) to avoid\par
+// looking those up from the database. This is useful for concurrently verifying\par
+// a batch of new headers.\par
+func (c *Clique) verifyHeader(chain consensus.ChainReader, header *types.Header, parents []*types.Header) error \{\par
+\tab if header.Number == nil \{\par
+\tab\tab return errUnknownBlock\par
+\tab\}\par
+\tab number := header.Number.Uint64()\par
+\par
+\tab // Don't waste time checking blocks from the future\par
+\tab if header.Time.Cmp(big.NewInt(time.Now().Unix())) > 0 \{\par
+\tab\tab return consensus.ErrFutureBlock\par
+\tab\}\par
+\tab // Checkpoint blocks need to enforce zero beneficiary\par
+\tab checkpoint := (number % c.config.Epoch) == 0\par
+\tab if checkpoint && header.Coinbase != (common.Address\{\}) \{\par
+\tab\tab return errInvalidCheckpointBeneficiary\par
+\tab\}\par
+\tab // Nonces must be 0x00..0 or 0xff..f, zeroes enforced on checkpoints\par
+\tab if !bytes.Equal(header.Nonce[:], nonceAuthVote) && !bytes.Equal(header.Nonce[:], nonceDropVote) \{\par
+\tab\tab return errInvalidVote\par
+\tab\}\par
+\tab if checkpoint && !bytes.Equal(header.Nonce[:], nonceDropVote) \{\par
+\tab\tab return errInvalidCheckpointVote\par
+\tab\}\par
+\tab // Check that the extra-data contains both the vanity and signature\par
+\tab if len(header.Extra) < extraVanity \{\par
+\tab\tab return errMissingVanity\par
+\tab\}\par
+\tab if len(header.Extra) < extraVanity+extraSeal \{\par
+\tab\tab return errMissingSignature\par
+\tab\}\par
+\tab // Ensure that the extra-data contains a signer list on checkpoint, but none otherwise\par
+\tab signersBytes := len(header.Extra) - extraVanity - extraSeal\par
+\tab if !checkpoint && signersBytes != 0 \{\par
+\tab\tab return errExtraSigners\par
+\tab\}\par
+\tab if checkpoint && signersBytes%common.AddressLength != 0 \{\par
+\tab\tab return errInvalidCheckpointSigners\par
+\tab\}\par
+\tab // Ensure that the mix digest is zero as we don't have fork protection currently\par
+\tab if header.MixDigest != (common.Hash\{\}) \{\par
+\tab\tab return errInvalidMixDigest\par
+\tab\}\par
+\tab // Ensure that the block doesn't contain any uncles which are meaningless in PoA\par
+\tab if header.UncleHash != uncleHash \{\par
+\tab\tab return errInvalidUncleHash\par
+\tab\}\par
+\tab // Ensure that the block's difficulty is meaningful (may not be correct at this point)\par
+\tab if number > 0 \{\par
+\tab\tab if header.Difficulty == nil || (header.Difficulty.Cmp(diffInTurn) != 0 && header.Difficulty.Cmp(diffNoTurn) != 0) \{\par
+\tab\tab\tab return errInvalidDifficulty\par
+\tab\tab\}\par
+\tab\}\par
+\tab // If all checks passed, validate any special fields for hard forks\par
+\tab if err := misc.VerifyForkHashes(chain.Config(), header, false); err != nil \{\par
+\tab\tab return err\par
+\tab\}\par
+\tab // All basic checks passed, verify cascading fields\par
+\tab return c.verifyCascadingFields(chain, header, parents)\par
+\}\par
+\par
+// verifyCascadingFields verifies all the header fields that are not standalone,\par
+// rather depend on a batch of previous headers. The caller may optionally pass\par
+// in a batch of parents (ascending order) to avoid looking those up from the\par
+// database. This is useful for concurrently verifying a batch of new headers.\par
+func (c *Clique) verifyCascadingFields(chain consensus.ChainReader, header *types.Header, parents []*types.Header) error \{\par
+\tab // The genesis block is the always valid dead-end\par
+\tab number := header.Number.Uint64()\par
+\tab if number == 0 \{\par
+\tab\tab return nil\par
+\tab\}\par
+\tab // Ensure that the block's timestamp isn't too close to it's parent\par
+\tab var parent *types.Header\par
+\tab if len(parents) > 0 \{\par
+\tab\tab parent = parents[len(parents)-1]\par
+\tab\} else \{\par
+\tab\tab parent = chain.GetHeader(header.ParentHash, number-1)\par
+\tab\}\par
+\tab if parent == nil || parent.Number.Uint64() != number-1 || parent.Hash() != header.ParentHash \{\par
+\tab\tab return consensus.ErrUnknownAncestor\par
+\tab\}\par
+\tab if parent.Time.Uint64()+c.config.Period > header.Time.Uint64() \{\par
+\tab\tab return ErrInvalidTimestamp\par
+\tab\}\par
+\tab // Retrieve the snapshot needed to verify this header and cache it\par
+\tab snap, err := c.snapshot(chain, number-1, header.ParentHash, parents)\par
+\tab if err != nil \{\par
+\tab\tab return err\par
+\tab\}\par
+\tab // If the block is a checkpoint block, verify the signer list\par
+\tab if number%c.config.Epoch == 0 \{\par
+\tab\tab signers := make([]byte, len(snap.Signers)*common.AddressLength)\par
+\tab\tab for i, signer := range snap.signers() \{\par
+\tab\tab\tab copy(signers[i*common.AddressLength:], signer[:])\par
+\tab\tab\}\par
+\tab\tab extraSuffix := len(header.Extra) - extraSeal\par
+\tab\tab if !bytes.Equal(header.Extra[extraVanity:extraSuffix], signers) \{\par
+\tab\tab\tab return errMismatchingCheckpointSigners\par
+\tab\tab\}\par
+\tab\}\par
+\tab // All basic checks passed, verify the seal and return\par
+\tab return c.verifySeal(chain, header, parents)\par
+\}\par
+\par
+// snapshot retrieves the authorization snapshot at a given point in time.\par
+func (c *Clique) snapshot(chain consensus.ChainReader, number uint64, hash common.Hash, parents []*types.Header) (*Snapshot, error) \{\par
+\tab // Search for a snapshot in memory or on disk for checkpoints\par
+\tab var (\par
+\tab\tab headers []*types.Header\par
+\tab\tab snap    *Snapshot\par
+\tab )\par
+\tab for snap == nil \{\par
+\tab\tab // If an in-memory snapshot was found, use that\par
+\tab\tab if s, ok := c.recents.Get(hash); ok \{\par
+\tab\tab\tab snap = s.(*Snapshot)\par
+\tab\tab\tab break\par
+\tab\tab\}\par
+\tab\tab // If an on-disk checkpoint snapshot can be found, use that\par
+\tab\tab if number%checkpointInterval == 0 \{\par
+\tab\tab\tab if s, err := loadSnapshot(c.config, c.signatures, c.db, hash); err == nil \{\par
+\tab\tab\tab\tab log.Trace("Loaded voting snapshot from disk", "number", number, "hash", hash)\par
+\tab\tab\tab\tab snap = s\par
+\tab\tab\tab\tab break\par
+\tab\tab\tab\}\par
+\tab\tab\}\par
+\tab\tab // If we're at an checkpoint block, make a snapshot if it's known\par
+\tab\tab if number == 0 || (number%c.config.Epoch == 0 && chain.GetHeaderByNumber(number-1) == nil) \{\par
+\tab\tab\tab checkpoint := chain.GetHeaderByNumber(number)\par
+\tab\tab\tab if checkpoint != nil \{\par
+\tab\tab\tab\tab hash := checkpoint.Hash()\par
+\par
+\tab\tab\tab\tab signers := make([]common.Address, (len(checkpoint.Extra)-extraVanity-extraSeal)/common.AddressLength)\par
+\tab\tab\tab\tab for i := 0; i < len(signers); i++ \{\par
+\tab\tab\tab\tab\tab copy(signers[i][:], checkpoint.Extra[extraVanity+i*common.AddressLength:])\par
+\tab\tab\tab\tab\}\par
+\tab\tab\tab\tab snap = newSnapshot(c.config, c.signatures, number, hash, signers)\par
+\tab\tab\tab\tab if err := snap.store(c.db); err != nil \{\par
+\tab\tab\tab\tab\tab return nil, err\par
+\tab\tab\tab\tab\}\par
+\tab\tab\tab\tab log.Info("Stored checkpoint snapshot to disk", "number", number, "hash", hash)\par
+\tab\tab\tab\tab break\par
+\tab\tab\tab\}\par
+\tab\tab\}\par
+\tab\tab // No snapshot for this header, gather the header and move backward\par
+\tab\tab var header *types.Header\par
+\tab\tab if len(parents) > 0 \{\par
+\tab\tab\tab // If we have explicit parents, pick from there (enforced)\par
+\tab\tab\tab header = parents[len(parents)-1]\par
+\tab\tab\tab if header.Hash() != hash || header.Number.Uint64() != number \{\par
+\tab\tab\tab\tab return nil, consensus.ErrUnknownAncestor\par
+\tab\tab\tab\}\par
+\tab\tab\tab parents = parents[:len(parents)-1]\par
+\tab\tab\} else \{\par
+\tab\tab\tab // No explicit parents (or no more left), reach out to the database\par
+\tab\tab\tab header = chain.GetHeader(hash, number)\par
+\tab\tab\tab if header == nil \{\par
+\tab\tab\tab\tab return nil, consensus.ErrUnknownAncestor\par
+\tab\tab\tab\}\par
+\tab\tab\}\par
+\tab\tab headers = append(headers, header)\par
+\tab\tab number, hash = number-1, header.ParentHash\par
+\tab\}\par
+\tab // Previous snapshot found, apply any pending headers on top of it\par
+\tab for i := 0; i < len(headers)/2; i++ \{\par
+\tab\tab headers[i], headers[len(headers)-1-i] = headers[len(headers)-1-i], headers[i]\par
+\tab\}\par
+\tab snap, err := snap.apply(headers)\par
+\tab if err != nil \{\par
+\tab\tab return nil, err\par
+\tab\}\par
+\tab c.recents.Add(snap.Hash, snap)\par
+\par
+\tab // If we've generated a new checkpoint snapshot, save to disk\par
+\tab if snap.Number%checkpointInterval == 0 && len(headers) > 0 \{\par
+\tab\tab if err = snap.store(c.db); err != nil \{\par
+\tab\tab\tab return nil, err\par
+\tab\tab\}\par
+\tab\tab log.Trace("Stored voting snapshot to disk", "number", snap.Number, "hash", snap.Hash)\par
+\tab\}\par
+\tab return snap, err\par
+\}\par
+\par
+// VerifyUncles implements consensus.Engine, always returning an error for any\par
+// uncles as this consensus mechanism doesn't permit uncles.\par
+func (c *Clique) VerifyUncles(chain consensus.ChainReader, block *types.Block) error \{\par
+\tab if len(block.Uncles()) > 0 \{\par
+\tab\tab return errors.New("uncles not allowed")\par
+\tab\}\par
+\tab return nil\par
+\}\par
+\par
+// VerifySeal implements consensus.Engine, checking whether the signature contained\par
+// in the header satisfies the consensus protocol requirements.\par
+func (c *Clique) VerifySeal(chain consensus.ChainReader, header *types.Header) error \{\par
+\tab return c.verifySeal(chain, header, nil)\par
+\}\par
+\par
+// verifySeal checks whether the signature contained in the header satisfies the\par
+// consensus protocol requirements. The method accepts an optional list of parent\par
+// headers that aren't yet part of the local blockchain to generate the snapshots\par
+// from.\par
+func (c *Clique) verifySeal(chain consensus.ChainReader, header *types.Header, parents []*types.Header) error \{\par
+\tab // Verifying the genesis block is not supported\par
+\tab number := header.Number.Uint64()\par
+\tab if number == 0 \{\par
+\tab\tab return errUnknownBlock\par
+\tab\}\par
+\tab // Retrieve the snapshot needed to verify this header and cache it\par
+\tab snap, err := c.snapshot(chain, number-1, header.ParentHash, parents)\par
+\tab if err != nil \{\par
+\tab\tab return err\par
+\tab\}\par
+\par
+\tab // Resolve the authorization key and check against signers\par
+\tab signer, err := ecrecover(header, c.signatures)\par
+\tab if err != nil \{\par
+\tab\tab return err\par
+\tab\}\par
+\tab if _, ok := snap.Signers[signer]; !ok \{\par
+\tab\tab return errUnauthorizedSigner\par
+\tab\}\par
+\tab for seen, recent := range snap.Recents \{\par
+\tab\tab if recent == signer \{\par
+\tab\tab\tab // Signer is among recents, only fail if the current block doesn't shift it out\par
+\tab\tab\tab if limit := uint64(len(snap.Signers)/2 + 1); seen > number-limit \{\par
+\tab\tab\tab\tab return errRecentlySigned\par
+\tab\tab\tab\}\par
+\tab\tab\}\par
+\tab\}\par
+\tab // Ensure that the difficulty corresponds to the turn-ness of the signer\par
+\tab if !c.fakeDiff \{\par
+\tab\tab inturn := snap.inturn(header.Number.Uint64(), signer)\par
+\tab\tab if inturn && header.Difficulty.Cmp(diffInTurn) != 0 \{\par
+\tab\tab\tab return errWrongDifficulty\par
+\tab\tab\}\par
+\tab\tab if !inturn && header.Difficulty.Cmp(diffNoTurn) != 0 \{\par
+\tab\tab\tab return errWrongDifficulty\par
+\tab\tab\}\par
+\tab\}\par
+\tab return nil\par
+\}\par
+\par
+// Prepare implements consensus.Engine, preparing all the consensus fields of the\par
+// header for running the transactions on top.\par
+func (c *Clique) Prepare(chain consensus.ChainReader, header *types.Header) error \{\par
+\tab // If the block isn't a checkpoint, cast a random vote (good enough for now)\par
+\tab header.Coinbase = common.Address\{\}\par
+\tab header.Nonce = types.BlockNonce\{\}\par
+\par
+\tab number := header.Number.Uint64()\par
+\tab // Assemble the voting snapshot to check which votes make sense\par
+\tab snap, err := c.snapshot(chain, number-1, header.ParentHash, nil)\par
+\tab if err != nil \{\par
+\tab\tab return err\par
+\tab\}\par
+\tab if number%c.config.Epoch != 0 \{\par
+\tab\tab c.lock.RLock()\par
+\par
+\tab\tab // Gather all the proposals that make sense voting on\par
+\tab\tab addresses := make([]common.Address, 0, len(c.proposals))\par
+\tab\tab for address, authorize := range c.proposals \{\par
+\tab\tab\tab if snap.validVote(address, authorize) \{\par
+\tab\tab\tab\tab addresses = append(addresses, address)\par
+\tab\tab\tab\}\par
+\tab\tab\}\par
+\tab\tab // If there's pending proposals, cast a vote on them\par
+\tab\tab if len(addresses) > 0 \{\par
+\tab\tab\tab header.Coinbase = addresses[rand.Intn(len(addresses))]\par
+\tab\tab\tab if c.proposals[header.Coinbase] \{\par
+\tab\tab\tab\tab copy(header.Nonce[:], nonceAuthVote)\par
+\tab\tab\tab\} else \{\par
+\tab\tab\tab\tab copy(header.Nonce[:], nonceDropVote)\par
+\tab\tab\tab\}\par
+\tab\tab\}\par
+\tab\tab c.lock.RUnlock()\par
+\tab\}\par
+\tab // Set the correct difficulty\par
+\tab header.Difficulty = CalcDifficulty(snap, c.signer)\par
+\par
+\tab // Ensure the extra data has all it's components\par
+\tab if len(header.Extra) < extraVanity \{\par
+\tab\tab header.Extra = append(header.Extra, bytes.Repeat([]byte\{0x00\}, extraVanity-len(header.Extra))...)\par
+\tab\}\par
+\tab header.Extra = header.Extra[:extraVanity]\par
+\par
+\tab if number%c.config.Epoch == 0 \{\par
+\tab\tab for _, signer := range snap.signers() \{\par
+\tab\tab\tab header.Extra = append(header.Extra, signer[:]...)\par
+\tab\tab\}\par
+\tab\}\par
+\tab header.Extra = append(header.Extra, make([]byte, extraSeal)...)\par
+\par
+\tab // Mix digest is reserved for now, set to empty\par
+\tab header.MixDigest = common.Hash\{\}\par
+\par
+\tab // Ensure the timestamp has the correct delay\par
+\tab parent := chain.GetHeader(header.ParentHash, number-1)\par
+\tab if parent == nil \{\par
+\tab\tab return consensus.ErrUnknownAncestor\par
+\tab\}\par
+\tab header.Time = new(big.Int).Add(parent.Time, new(big.Int).SetUint64(c.config.Period))\par
+\tab if header.Time.Int64() < time.Now().Unix() \{\par
+\tab\tab header.Time = big.NewInt(time.Now().Unix())\par
+\tab\}\par
+\tab return nil\par
+\}\par
+\par
+// Finalize implements consensus.Engine, ensuring no uncles are set, nor block\par
+// rewards given, and returns the final block.\par
+func (c *Clique) Finalize(chain consensus.ChainReader, header *types.Header, state *state.StateDB, txs []*types.Transaction, uncles []*types.Header, receipts []*types.Receipt) (*types.Block, error) \{\par
+\tab // No block rewards in PoA, so the state remains as is and uncles are dropped\par
+\tab header.Root = state.IntermediateRoot(chain.Config().IsEIP158(header.Number))\par
+\tab header.UncleHash = types.CalcUncleHash(nil)\par
+\par
+\tab // Assemble and return the final block for sealing\par
+\tab return types.NewBlock(header, txs, nil, receipts), nil\par
+\}\par
+\par
+// Authorize injects a private key into the consensus engine to mint new blocks\par
+// with.\par
+func (c *Clique) Authorize(signer common.Address, signFn SignerFn) \{\par
+\tab c.lock.Lock()\par
+\tab defer c.lock.Unlock()\par
+\par
+\tab c.signer = signer\par
+\tab c.signFn = signFn\par
+\}\par
+\par
+// Seal implements consensus.Engine, attempting to create a sealed block using\par
+// the local signing credentials.\par
+func (c *Clique) Seal(chain consensus.ChainReader, block *types.Block, results chan<- *types.Block, stop <-chan struct\{\}) error \{\par
+\tab header := block.Header()\par
+\par
+\tab // Sealing the genesis block is not supported\par
+\tab number := header.Number.Uint64()\par
+\tab if number == 0 \{\par
+\tab\tab return errUnknownBlock\par
+\tab\}\par
+\tab // For 0-period chains, refuse to seal empty blocks (no reward but would spin sealing)\par
+\tab if c.config.Period == 0 && len(block.Transactions()) == 0 \{\par
+\tab\tab log.Info("Sealing paused, waiting for transactions")\par
+\tab\tab return nil\par
+\tab\}\par
+\tab // Don't hold the signer fields for the entire sealing procedure\par
+\tab c.lock.RLock()\par
+\tab signer, signFn := c.signer, c.signFn\par
+\tab c.lock.RUnlock()\par
+\par
+\tab // Bail out if we're unauthorized to sign a block\par
+\tab snap, err := c.snapshot(chain, number-1, header.ParentHash, nil)\par
+\tab if err != nil \{\par
+\tab\tab return err\par
+\tab\}\par
+\tab if _, authorized := snap.Signers[signer]; !authorized \{\par
+\tab\tab return errUnauthorizedSigner\par
+\tab\}\par
+\tab // If we're amongst the recent signers, wait for the next block\par
+\tab for seen, recent := range snap.Recents \{\par
+\tab\tab if recent == signer \{\par
+\tab\tab\tab // Signer is among recents, only wait if the current block doesn't shift it out\par
+\tab\tab\tab if limit := uint64(len(snap.Signers)/2 + 1); number < limit || seen > number-limit \{\par
+\tab\tab\tab\tab log.Info("Signed recently, must wait for others")\par
+\tab\tab\tab\tab return nil\par
+\tab\tab\tab\}\par
+\tab\tab\}\par
+\tab\}\par
+\tab // Sweet, the protocol permits us to sign the block, wait for our time\par
+\tab delay := time.Unix(header.Time.Int64(), 0).Sub(time.Now()) // nolint: gosimple\par
+\tab if header.Difficulty.Cmp(diffNoTurn) == 0 \{\par
+\tab\tab // It's not our turn explicitly to sign, delay it a bit\par
+\tab\tab wiggle := time.Duration(len(snap.Signers)/2+1) * wiggleTime\par
+\tab\tab delay += time.Duration(rand.Int63n(int64(wiggle)))\par
+\par
+\tab\tab log.Trace("Out-of-turn signing requested", "wiggle", common.PrettyDuration(wiggle))\par
+\tab\}\par
+\tab // Sign all the things!\par
+\tab sighash, err := signFn(accounts.Account\{Address: signer\}, sigHash(header).Bytes())\par
+\tab if err != nil \{\par
+\tab\tab return err\par
+\tab\}\par
+\tab copy(header.Extra[len(header.Extra)-extraSeal:], sighash)\par
+\tab // Wait until sealing is terminated or delay timeout.\par
+\tab log.Trace("Waiting for slot to sign and propagate", "delay", common.PrettyDuration(delay))\par
+\tab go func() \{\par
+\tab\tab select \{\par
+\tab\tab case <-stop:\par
+\tab\tab\tab return\par
+\tab\tab case <-time.After(delay):\par
+\tab\tab\}\par
+\par
+\tab\tab select \{\par
+\tab\tab case results <- block.WithSeal(header):\par
+\tab\tab default:\par
+\tab\tab\tab log.Warn("Sealing result is not read by miner", "sealhash", c.SealHash(header))\par
+\tab\tab\}\par
+\tab\}()\par
+\par
+\tab return nil\par
+\}\par
+\par
+// CalcDifficulty is the difficulty adjustment algorithm. It returns the difficulty\par
+// that a new block should have based on the previous blocks in the chain and the\par
+// current signer.\par
+func (c *Clique) CalcDifficulty(chain consensus.ChainReader, time uint64, parent *types.Header) *big.Int \{\par
+\tab snap, err := c.snapshot(chain, parent.Number.Uint64(), parent.Hash(), nil)\par
+\tab if err != nil \{\par
+\tab\tab return nil\par
+\tab\}\par
+\tab return CalcDifficulty(snap, c.signer)\par
+\}\par
+\par
+// CalcDifficulty is the difficulty adjustment algorithm. It returns the difficulty\par
+// that a new block should have based on the previous blocks in the chain and the\par
+// current signer.\par
+func CalcDifficulty(snap *Snapshot, signer common.Address) *big.Int \{\par
+\tab if snap.inturn(snap.Number+1, signer) \{\par
+\tab\tab return new(big.Int).Set(diffInTurn)\par
+\tab\}\par
+\tab return new(big.Int).Set(diffNoTurn)\par
+\}\par
+\par
+// SealHash returns the hash of a block prior to it being sealed.\par
+func (c *Clique) SealHash(header *types.Header) common.Hash \{\par
+\tab return sigHash(header)\par
+\}\par
+\par
+// Close implements consensus.Engine. It's a noop for clique as there are no background threads.\par
+func (c *Clique) Close() error \{\par
+\tab return nil\par
+\}\par
+\par
+// APIs implements consensus.Engine, returning the user facing RPC API to allow\par
+// controlling the signer voting.\par
+func (c *Clique) APIs(chain consensus.ChainReader) []rpc.API \{\par
+\tab return []rpc.API\{\{\par
+\tab\tab Namespace: "clique",\par
+\tab\tab Version:   "1.0",\par
+\tab\tab Service:   &API\{chain: chain, clique: c\},\par
+\tab\tab Public:    false,\par
+\tab\}\}\par
+\}\par
+\par
+}
+ 
