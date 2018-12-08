@@ -20,6 +20,7 @@ More detail About XDPoS:
 
 Here is the scope for the XinFin Blockchain DPoS (Delegated Proof-of-Stake) Consensus Network Scope.
 
+Reward: 10,000 USD worth of XDC
 1. Staking
 First a user will send his coins to the contract, that will register what the user staked. The user will have to wait for 2 epochs (epoch N+2N+2) before being able to vote for a delegate.
 
@@ -53,9 +54,11 @@ Suppose if a node is misbehaving and we are removing it ,so will the node be pre
 DPoS References Github Repo:
 
 Existing DPOS projects for Ethereum Virtual Machine:
+
 TomoChain: https://github.com/tomochain
 https://github.com/tomochain/tomochain/tree/master/consensus/posv
 
 Tron: https://github.com/tronprotocol/java-tron
 
 EOS : https://github.com/EOSIO
+
