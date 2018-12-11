@@ -1,6 +1,6 @@
 XDPoS: XinFin Delegated Proof of Stake consensus
 
-XinFin’s token XDC supplants proof-of-work consensus algorithm (popularly linked with mining, high Transaction fees & High Power Consumption) with proof-of-stake consensus algorithm, fundamentally using the concept of “validators” to Optimise Speed of the transaction, efficiency, reduce the cost of the infrastructure. This Validators are special nodes used in the DPoS consensus algorithm which validate each transaction occurring on the blockchain network. The result of this validation is to finally append the transaction on the blockchain. A transaction may be accepted by the validator or rejected. 
+XinFin’s token XDC supplants proof-of-work consensus algorithm (popularly linked with mining Linked with Costly hardware infrastructure investment and High Power Consumption results into higher Transaction fees makes it more non-favourable for real world usecase) with proof-of-stake consensus algorithm, fundamentally using the concept of “validators” to Optimise Speed of the transaction, efficiency, reduce the cost of the infrastructure. This Validators are special nodes used in the DPoS consensus algorithm which validate each transaction occurring on the blockchain network. The result of this validation is to finally append the transaction on the blockchain. A transaction may be accepted by the validator or rejected. 
 
 XDPoS relies on a system of 5000 Masternodes and 21 Validator node with Proof of Stake consensus.
 
