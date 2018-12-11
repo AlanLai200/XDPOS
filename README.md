@@ -52,14 +52,13 @@ Wrong KYC /AMA certificate lead to 100% stake reduction. Such masternode will be
 Suppose if a node is misbehaving and we are removing it ,so will the node be present in the validators list or the node is no more part of the network.
 
 DPoS References Github Repo:
-Existing DPOS projects for Ethereum Virtual Machine:
-
+Existing DPOS projects for Refernce Code:
 TomoChain: https://github.com/tomochain/tomochain/tree/master/consensus/posv
 
 Tron: https://github.com/tronprotocol/
 
 EOS : https://github.com/EOSIO
 
-Ethereum PoW Conensus Github as Refernce code to check PoW: 
+Ethereum Proof Of Work (PoW) Conensus Refernce code: 
 https://github.com/riteshkakkad/go-ethereum/tree/master/consensus
 
