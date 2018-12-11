@@ -54,10 +54,12 @@ Suppose if a node is misbehaving and we are removing it ,so will the node be pre
 DPoS References Github Repo:
 Existing DPOS projects for Ethereum Virtual Machine:
 
-TomoChain: https://github.com/tomochain
-https://github.com/tomochain/tomochain/tree/master/consensus/posv
+TomoChain: https://github.com/tomochain/tomochain/tree/master/consensus/posv
 
-Tron: https://github.com/tronprotocol/java-tron
+Tron: https://github.com/tronprotocol/
 
 EOS : https://github.com/EOSIO
+
+Ethereum PoW Conensus Github as Refernce code to check PoW: 
+https://github.com/riteshkakkad/go-ethereum/tree/master/consensus
 
